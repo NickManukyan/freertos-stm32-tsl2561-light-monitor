@@ -1,8 +1,8 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-#include "tsl2561.h"            // TSL2561 sensor driver header (implement or use library)
-#include "lcd_i2c.h"            // I2C LCD driver header (implement or use library)
+#include "tsl2561.h"            // TSL2561 sensor driver header 
+#include "lcd_i2c.h"            // I2C LCD driver header
 
 /* Private variables ---------------------------------------------------------*/
 osThreadId_t sensorTaskHandle;
