@@ -33,7 +33,9 @@ FreeRTOS-based embedded project for the STM32F103C8 microcontroller that reads a
 
 Optionally: You may connect a separate LED but in this setup the onboard LED is used. 
 
-
+LED 
+KS0061
+<img width="200" height="200" alt="image" src="https://github.com/user-attachments/assets/93d193c5-947f-4dff-b143-3644df86b1f8" />
 
 ## Notes
 - This project uses CMSIS-RTOS v2 APIs for FreeRTOS.
