@@ -26,11 +26,12 @@ FreeRTOS-based embedded project for the STM32F103C8 microcontroller that reads a
 
 ## Hardware Required
 
-- STM32F103C8 board
+- STM32F446RE NUCLEO Board
 - TSL2561 Ambient Light Sensor
 - I2C LCD Display (in this case 16x2)
 - Connecting wires and breadboard
-- Optional: LED connected to PC13 (We are using the default onboard LED)
+
+Optionally: You may connect a separate LED but in this setup the onboard LED is used. 
 
 
 
