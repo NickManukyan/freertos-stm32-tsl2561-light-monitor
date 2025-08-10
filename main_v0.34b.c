@@ -1,20 +1,26 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-#include "tsl2561.h"            // TSL2561 sensor driver header 
-#include "lcd_i2c.h"            // I2C LCD driver header
+#include "tsl2561.h"    //  TSL2561 driver
+#include "lcd_i2c.h"    //  I2C LCD driver
 
-/* Private variables ---------------------------------------------------------*/
+/* Task handles --------------------------------------------------------------*/
 osThreadId_t sensorTaskHandle;
 osThreadId_t displayTaskHandle;
 osThreadId_t ledTaskHandle;
-osMessageQueueId_t sensorDataQueueHandle;
+osMutexId_t sensorDataMutexHandle;
 
+/* I2C handle */
+I2C_HandleTypeDef hi2c1;
+
+/* Shared sensor data */
 typedef struct {
-  uint32_t lux;
+    uint32_t lux;
 } SensorData_t;
 
-/* Private function prototypes -----------------------------------------------*/
+SensorData_t sharedSensorData = {0};
+
+/* Function prototypes -------------------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
@@ -23,176 +29,173 @@ void StartSensorTask(void *argument);
 void StartDisplayTask(void *argument);
 void StartLedTask(void *argument);
 
-/* Peripheral handles */
-I2C_HandleTypeDef hi2c1;
-
 /* Main function --------------------------------------------------------------*/
 int main(void)
 {
-  HAL_Init();
-  SystemClock_Config();
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_I2C1_Init();
 
-  MX_GPIO_Init();
-  MX_I2C1_Init();
+    /* Initialize peripherals */
+    lcd_init(&hi2c1);
+    tsl2561_init(&hi2c1);
 
-  lcd_init(&hi2c1);         // Initialize LCD (implement lcd_i2c library)
-  tsl2561_init(&hi2c1);     // Initialize TSL2561 sensor (implement tsl2561 library)
+    /* Create mutex */
+    const osMutexAttr_t sensorDataMutex_attributes = {
+        .name = "sensorDataMutex"
+    };
+    sensorDataMutexHandle = osMutexNew(&sensorDataMutex_attributes);
 
-  /* Create message queue for sensor data */
-  sensorDataQueueHandle = osMessageQueueNew(5, sizeof(SensorData_t), NULL);
+    /* Create tasks */
+    const osThreadAttr_t sensorTask_attributes = {
+        .name = "SensorTask",
+        .priority = (osPriority_t) osPriorityNormal,
+        .stack_size = 256
+    };
+    sensorTaskHandle = osThreadNew(StartSensorTask, NULL, &sensorTask_attributes);
 
-  /* Create tasks */
-  const osThreadAttr_t sensorTask_attributes = {
-    .name = "SensorTask",
-    .priority = (osPriority_t) osPriorityNormal,
-    .stack_size = 256
-  };
-  sensorTaskHandle = osThreadNew(StartSensorTask, NULL, &sensorTask_attributes);
+    const osThreadAttr_t displayTask_attributes = {
+        .name = "DisplayTask",
+        .priority = (osPriority_t) osPriorityBelowNormal,
+        .stack_size = 256
+    };
+    displayTaskHandle = osThreadNew(StartDisplayTask, NULL, &displayTask_attributes);
 
-  const osThreadAttr_t displayTask_attributes = {
-    .name = "DisplayTask",
-    .priority = (osPriority_t) osPriorityBelowNormal,
-    .stack_size = 256
-  };
-  displayTaskHandle = osThreadNew(StartDisplayTask, NULL, &displayTask_attributes);
+    const osThreadAttr_t ledTask_attributes = {
+        .name = "LedTask",
+        .priority = (osPriority_t) osPriorityLow,
+        .stack_size = 128
+    };
+    ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
 
-  const osThreadAttr_t ledTask_attributes = {
-    .name = "LedTask",
-    .priority = (osPriority_t) osPriorityLow,
-    .stack_size = 128
-  };
-  ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
+    /* Start scheduler */
+    osKernelStart();
 
-  /* Start scheduler */
-  osKernelStart();
-
-  Error_Handler();
+    /* Infinite loop */
+    while (1) {}
 }
 
-/* Sensor task: reads TSL2561 lux data every 1 second and sends to queue */
+/* Sensor Task: reads TSL2561 lux value every 1s */
 void StartSensorTask(void *argument)
 {
-  SensorData_t sensorData;
-  for(;;)
-  {
-    if(tsl2561_read_lux(&sensorData.lux) == HAL_OK)
+    SensorData_t tempData;
+    for(;;)
     {
-      osMessageQueuePut(sensorDataQueueHandle, &sensorData, 0, 0);
+        if(tsl2561_read_lux(&tempData.lux) == HAL_OK)
+        {
+            osMutexAcquire(sensorDataMutexHandle, osWaitForever);
+            sharedSensorData = tempData;
+            osMutexRelease(sensorDataMutexHandle);
+        }
+        osDelay(1000);
     }
-    osDelay(1000);
-  }
 }
 
-/* Display task: receives sensor data and updates LCD */
+/* Display Task: updates LCD with latest lux value */
 void StartDisplayTask(void *argument)
 {
-  SensorData_t sensorData;
-  char line1[17];
+    char line1[17];
+    SensorData_t localCopy;
 
-  for(;;)
-  {
-    if(osMessageQueueGet(sensorDataQueueHandle, &sensorData, NULL, osWaitForever) == osOK)
+    for(;;)
     {
-      snprintf(line1, sizeof(line1), "Light: %lu lux", sensorData.lux);
+        osMutexAcquire(sensorDataMutexHandle, osWaitForever);
+        localCopy = sharedSensorData;
+        osMutexRelease(sensorDataMutexHandle);
 
-      lcd_clear();
-      lcd_set_cursor(0, 0);
-      lcd_print(line1);
+        snprintf(line1, sizeof(line1), "Light: %lu lux", localCopy.lux);
+        lcd_clear();
+        lcd_set_cursor(0, 0);
+        lcd_print(line1);
+
+        osDelay(1000);
     }
-  }
 }
 
-/* LED task: blinks LED with variable speed based on lux value */
+/* LED Task: blinks LED based on light intensity */
 void StartLedTask(void *argument)
 {
-  SensorData_t lastData = {0};
-  uint32_t blinkDelay = 500;
+    SensorData_t localCopy;
+    uint32_t blinkDelay = 500;
 
-  for(;;)
-  {
-    SensorData_t newData;
-    if(osMessageQueueGet(sensorDataQueueHandle, &newData, NULL, 0) == osOK)
+    for(;;)
     {
-      lastData = newData;
+        osMutexAcquire(sensorDataMutexHandle, osWaitForever);
+        localCopy = sharedSensorData;
+        osMutexRelease(sensorDataMutexHandle);
+
+        if(localCopy.lux > 5000)
+            blinkDelay = 200;
+        else if(localCopy.lux < 1000)
+            blinkDelay = 800;
+        else
+            blinkDelay = 500;
+
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+        osDelay(blinkDelay);
     }
-
-    // Adjust blink speed: faster blink if bright, slower if dark
-    if(lastData.lux > 5000)
-      blinkDelay = 200;  // bright environment - fast blink
-    else if(lastData.lux < 1000)
-      blinkDelay = 800;  // dark environment - slow blink
-    else
-      blinkDelay = 500;  // moderate light
-
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-    osDelay(blinkDelay);
-  }
 }
 
-/* --- Peripheral init functions --- */
+/* GPIO Init: PA5 for onboard LED */
 static void MX_GPIO_Init(void)
 {
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* Configure PC13 (LED pin) as output */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
+/* I2C1 Init: PB8=SCL, PB9=SDA */
 static void MX_I2C1_Init(void)
 {
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  HAL_I2C_Init(&hi2c1);
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 100000;
+    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    HAL_I2C_Init(&hi2c1);
 }
 
-/* System clock config - use your STM32CubeMX generated one */
+/* System Clock Config: 8 MHz HSE → 72 MHz SYSCLK */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-  
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+        Error_Handler();
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+        Error_Handler();
 }
 
-/* Placeholder error handler */
+/* Error Handler */
 void Error_Handler(void)
 {
-  while(1)
-  {
-    // Optional: Can add a blink LED here to indicate error more clearly
-  }
+    while(1)
+    {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+        HAL_Delay(200);
+    }
 }
