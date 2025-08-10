@@ -12,7 +12,7 @@ FreeRTOS-based embedded project for the STM32F103C8 microcontroller that reads a
 4. Add or implement the following drivers:
    - TSL2561 sensor driver (`tsl2561.h`/`c`)
    - I2C LCD driver (`lcd_i2c.h`/`c`)
-5. Build and flash the project to the STM32F103C8 board.
+5. Build and flash the project to the STM32 board.
 
 
 
